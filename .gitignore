@@ -2,3 +2,4 @@ proxy
 proxy.o
 proxy_parse.o
 .vscode/
+.DS_Store

@@ -15,8 +15,6 @@
 #include <pthread.h>
 #include <semaphore.h>
 
-// how to free up cache
-
 #define MAX_CLIENTS 10 // change later, inc it
 #define MAX_BYTES 4096 // max allowed size of http request/response
 #define MAX_SIZE 200*(1<<20) // max size of our total LRU cache
@@ -56,13 +54,13 @@ int connectRemoteServer(char* host_addr, int port_number){
         fprintf(stderr, "No such host exists\n");
         return -1;
     }
-
-    struct sockaddr_in* server_addr;
+    
+    struct sockaddr_in server_addr;
     bzero((char*)&server_addr, sizeof(server_addr));
-    server_addr->sin_family = AF_INET;
-    server_addr->sin_port = htons(port_number);
-    bcopy((char*)host->h_addr, (char*)&server_addr->sin_addr.s_addr, host->h_length);
-    if(connect(remoteSocket, (struct sockaddr*)&server_addr, (size_t)sizeof(server_addr))<0){
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port_number);
+    bcopy((char*)host->h_addr, (char*)&server_addr.sin_addr.s_addr, host->h_length);
+    if(connect(remoteSocket, (struct sockaddr*)&server_addr, (socklen_t)sizeof(server_addr))<0){
         fprintf(stderr, "Error connecting with remote socket\n");
         return -1;
     }
@@ -109,7 +107,7 @@ int sendErrorMessage(int socket, int status_code)
 				  break;
 
 		case 500: snprintf(str, sizeof(str), "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 115\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\n<BODY><H1>500 Internal Server Error</H1>\n</BODY></HTML>", currentTime);
-				  //printf("500 Internal Server Error\n");
+				  printf("500 Internal Server Error\n");
 				  send(socket, str, strlen(str), 0);
 				  break;
 
@@ -133,7 +131,7 @@ int handle_request(int clientSocketId, ParsedRequest *request, char *tempReq)
 {
 
     char *buf = (char *)malloc(sizeof(char) * MAX_BYTES);
-    strcpy(buf, "GET");
+    strcpy(buf, "GET ");
     strcat(buf, request->path);
     strcat(buf, " ");
     strcat(buf, request->version);
@@ -173,13 +171,15 @@ int handle_request(int clientSocketId, ParsedRequest *request, char *tempReq)
             printf("Invalid port, using default 80\n");
         }
     }
-    printf("hello from 12\n");
     int remoteSocketId = connectRemoteServer(request->host, server_port);
+    if (remoteSocketId < 0) {
+       free(buf);
+       return -1;
+    }
     int bytes_send = send(remoteSocketId, buf, strlen(buf),0); // sending http req to server. from buf
     bzero(buf, MAX_BYTES);
     
-    printf("hello from 14\n");
-    bytes_send = recv(remoteSocketId, buf, MAX_BYTES-1, 0); // last one index stored for null char
+    bytes_send = recv(remoteSocketId, buf, MAX_BYTES-1, 0); // last one index stored for null terminator
     char* temp_buffer = (char*)malloc(sizeof(char)*MAX_BYTES);
     int temp_buffer_size = MAX_BYTES;
     int temp_buffer_index = 0;
@@ -188,7 +188,7 @@ int handle_request(int clientSocketId, ParsedRequest *request, char *tempReq)
     while(bytes_send > 0){
         // bytes_send var stores size of data sent or received
         bytes_send = send(clientSocketId, buf, bytes_send, 0);
-        for(int i = 0; i<bytes_send; i++){
+        for(int i = 0; i<bytes_send/sizeof(char); i++){
             temp_buffer[temp_buffer_index] = buf[i];
             temp_buffer_index++;
         }
@@ -236,6 +236,22 @@ void *thread_fn(void *socketNew)
         }
     }
 
+    // to remove the leading '/' when using via browser
+    // len = strlen(buffer);
+    // char* first_space = strchr(buffer, ' ');
+    // if(first_space) {
+    //     char* path_start = first_space + 1;
+    //     if (strncmp(path_start, "/http://", 8) == 0) {
+    //         memmove(path_start, path_start + 1, strlen(path_start));
+    //             len--;
+    //         }
+    // }
+
+    printf("=== REQUEST BEING PARSED ===\n");
+    printf("Request length: %d\n", len);
+    printf("Request first 200 chars: %.200s\n", buffer);
+    printf("=== END REQUEST ===\n");
+
     char *tempReq = (char *)calloc(strlen(buffer) + 1, sizeof(char)); // strlen did not count the null terminator in total len. so i had to assign one extra space for null
     for (int i = 0; i < strlen(buffer); i++)
     {
@@ -245,6 +261,7 @@ void *thread_fn(void *socketNew)
     struct cache_element *temp = find(tempReq);
     if (temp != NULL)
     {
+        printf("entering 1 \n");
         int size = temp->len / sizeof(char);
         int pos = 0;
         char response[MAX_BYTES];
@@ -253,7 +270,7 @@ void *thread_fn(void *socketNew)
             bzero(response, MAX_BYTES);
             for (int i = 0; i < MAX_BYTES; i++)
             {
-                response[i] = temp->data[i]; // if it was not cached, i will get HTML response from server and cache it in temp->data and next time send it from cache
+                response[i] = temp->data[pos]; // if it was not cached, i will get HTML response from server and cache it in temp->data and next time send it from cache
                 pos++;
             }
             send(socket, response, MAX_BYTES, 0);
@@ -263,6 +280,7 @@ void *thread_fn(void *socketNew)
     }
     else if (bytes_received_client > 0)
     {
+        printf("entering 2 \n");
         len = strlen(buffer);
         ParsedRequest *request = ParsedRequest_create();
 
@@ -277,9 +295,8 @@ void *thread_fn(void *socketNew)
             {
                 if (request->host && request->path && checkHTTPversion(request->version) == 1)
                 {
-                    printf("reached here 2 \n");
+                    printf("host: %s\n", request->host); // some bug possible here
                     int request_status = handle_request(socket, request, tempReq);
-                    printf("reached here 3 \n");
                     if (request_status == -1)
                     {
                         sendErrorMessage(socket, 500);
@@ -300,6 +317,8 @@ void *thread_fn(void *socketNew)
     else if (bytes_received_client == 0)
     {
         printf("client is disconnected \n");
+    }else if(bytes_received_client < 0){
+        perror("Error in receiving from client \n");
     }
     shutdown(socket, SHUT_RDWR);
     close(socket);
